@@ -1,8 +1,10 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import logging
 from dotenv import load_dotenv
 import os
+from datetime import datetime
+import pytz
 
 load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
@@ -16,13 +18,82 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 secret_role = "Trusted"
 
+def get_users_from_list():
+    """Read existing users from User_List file."""
+    users = set()
+    try:
+        with open("User_List", "r", encoding="utf-8") as f:
+            for line in f:
+                # Extract username (everything before " - Joined:")
+                if " - Joined:" in line:
+                    username = line.split(" - Joined:")[0].strip()
+                else:
+                    # Handle old format without timestamp
+                    username = line.strip()
+                if username:
+                    users.add(username)
+    except FileNotFoundError:
+        pass
+    return users
+
+async def sync_users_to_list():
+    """Check all members on server and add any missing ones to User_List."""
+    cet = pytz.timezone('Europe/Berlin')
+    current_time = datetime.now(cet).strftime("%Y-%m-%d %H:%M:%S CET")
+    existing_users = get_users_from_list()
+    
+    # Get all members from all guilds
+    all_members = set()
+    for guild in bot.guilds:
+        for member in guild.members:
+            if not member.bot:  # Exclude bots
+                all_members.add(member.name)
+    
+    # Find missing members
+    missing_members = all_members - existing_users
+    
+    # Add missing members to the list
+    if missing_members:
+        with open("User_List", "a", encoding="utf-8") as f:
+            for member_name in sorted(missing_members):
+                f.write(f"{member_name} - Joined: {current_time}\n")
+        print(f"Added {len(missing_members)} missing member(s) to User_List")
+
+@tasks.loop(hours=1)
+async def hourly_sync():
+    """Sync users every hour."""
+    await sync_users_to_list()
+
 @bot.event
 async def on_ready():
     print(f"We are ready to go in, {bot.user.name}")
+    # Initial sync at startup
+    await sync_users_to_list()
+    # Start hourly sync task
+    hourly_sync.start()
+
+@bot.event
+async def on_member_remove(member):
+    # Remove member name from User_List
+    try:
+        with open("User_List", "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        with open("User_List", "w", encoding="utf-8") as f:
+            for line in lines:
+                # Check if line starts with member name (handles both old format and new format with timestamp)
+                if not line.strip().startswith(member.name):
+                    f.write(line)
+    except FileNotFoundError:
+        pass
 
 @bot.event
 async def on_member_join(member):
     await member.send(f"Welcome to the server {member.name}")
+    # Add member name and join time (CET) to User_List
+    cet = pytz.timezone('Europe/Berlin')  # CET/CEST timezone
+    join_time = datetime.now(cet).strftime("%Y-%m-%d %H:%M:%S CET")
+    with open("User_List", "a", encoding="utf-8") as f:
+        f.write(f"{member.name} - Joined: {join_time}\n")
 
 @bot.event
 async def on_message(message):
